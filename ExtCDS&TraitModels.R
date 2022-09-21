@@ -1,7 +1,7 @@
 ##################################################################
 ### Code to assemble data for analyses                         ###
 ### Seedclim climate difference spp responses by traits paper  ###
-### Cover by species                                           ###
+### Exctinction by species                                     ###
 ### Lynn et al.                                                ###
 ##################################################################
 
@@ -9,10 +9,16 @@
 library(tidyverse); library(car); library(rjags); library(R2jags); library(coda)
 library(broom.mixed)
 
+# inverse logit function
+invlogit<-function(x){a <- exp(x)/(1+exp(x))
+a[is.nan(a)]=1
+return(a)
+}
+
 # load in data
 dat <- read_csv("LynnETAL_Macrocontext_trait_data.csv")
 
-### start with model of cover and MAT CDS
+### start with model of extinction and MAT CDS
 # group level effects
 site <- factor(dat$destSiteID)
 block <- factor(dat$destBlockID)
@@ -22,22 +28,22 @@ spp <- factor(dat$species)
 mat <- dat$mat_meandiff
 
 #dependent variable
-cov <- dat$dif2
-N <- as.numeric(length(cov))
+ext <- dat$extinct
+N <- as.numeric(length(ext))
 
-# assemble data and required params
-jags.data <- list("site", "block","spp", "mat", "cov", "N")
-jags.param <- c("a", "b", "prec1","prec2","prec3", "asig1","asig2", "asig3")
+# assemble the data and required params
+jags.data <- list("site", "block","spp", "mat", "ext", "N")
+jags.param <- c("a", "b", "prec1","prec2", "asig1","asig2")
 
-# Step 1 - CDS model 
+# Step 1 - CDS model
 matdifmod <- function(){ 
   # group effects
   for (j in 1:12){nettstedet[j]~dnorm(0, prec1)}
   for (j in 1:60){blokkere[j]~dnorm(0, prec2)}
   #likelihood
   for (i in 1:N){
-    cov[i]~dnorm(mu[i], prec3)
-    mu[i] <- a[spp[i]]+ b[spp[i]]*mat[i] + nettstedet[site[i]]+ 
+    ext[i]~dbern(mu[i])
+    logit(mu[i]) <- a[spp[i]]+ b[spp[i]]*mat[i] + nettstedet[site[i]]+ 
       blokkere[block[i]]
   }
   # priors
@@ -45,37 +51,36 @@ matdifmod <- function(){
   for(j in 1:75){b[j]~dnorm(0, 1E-6)}
   prec1~dgamma(0.001,0.001)
   prec2~dgamma(0.001,0.001)
-  prec3~dgamma(0.001,0.001)
   asig1 <- 1/sqrt(prec1)
   asig2 <- 1/sqrt(prec2)
-  asig3 <- 1/sqrt(prec3)
 }
 
+# run the model
 matdif <- jags.parallel(data=jags.data,inits=NULL, parameters.to.save=jags.param,
-                        n.iter=50000 ,model.file=matdifmod, n.thin=5, n.chains=3)
+                        n.iter=500000 ,model.file=matdifmod, n.thin=5, n.chains=3)
 
-# view the results
+# View results
 matdif 
 
-# put sims into a list
+# put sims in a list
 matdif.paramlist <- matdif$BUGSoutput$sims.list
 
 # save poseteriors
 matint <- data.frame(matdif.paramlist$a)
 names(matint) <- c(levels(spp))
 matint <- data.frame(apply(matint, 2, sort))
-write.csv(matint, "SppCovIntMAT_post.csv")
+write.csv(matint, "SppExtIntMAT_post_pos.csv")
 matint <- matint %>% gather(key="spp", value="int")
 
 matslop <- as.data.frame(matdif.paramlist$b)
 names(matslop) <- c(levels(spp))
 matslop <- data.frame(apply(matslop, 2, sort))
-write.csv(matslop,"SppCovSlopeMAT_post.csv" )
+write.csv(matslop,"SppExtSlopeMAT_post_pos.csv" )
 matslop <- matslop %>% gather(key="spp", value="slope")
 
 matint$slope <- matslop$slope
 
-# summarize posteriors for CDS categorization
+# summarize posteriors
 matdifparm <- matint %>% group_by(spp) %>%
   summarize(m_int=median(int),
             max_int=max(int), 
@@ -93,18 +98,21 @@ spprangemat <- dat %>% group_by(species) %>%
             meanmat = mean(mat_meandiff))%>%
   rename(spp=species)
 
-
 matdifparm <- full_join(matdifparm, spprangemat, by="spp", copy=TRUE)
 
 # add in the trait data
 traitformod <-  dat %>% select(species, m_height_spp:seed_mass) %>% unique()
 matdifparm <- left_join(matdifparm, traitformod, by=c("spp"="species"))
 
+# drop species that didn't converge
+matdifparm <- matdifparm %>% filter(!spp %in% c("Car.pan","Dia.del","Gal.ver", "Noc.cae", "Sax.aiz"))
+dat2 <- dat %>% filter(!spp %in% c("Car.pan","Dia.del","Gal.ver", "Noc.cae", "Sax.aiz"))
+
 # classify CDS
 matdifparm <- matdifparm %>% 
-  mutate(slope_cat = if_else(m_slope/sig_slope <  -1, "Negative", 
-                          if_else(m_slope/sig_slope < 1 & m_slope/sig_slope > -1,
-                                  "Zero", "Positive")))
+  mutate(slope_cat = if_else(m_slope/sig_slope <  -1, "Negative",
+                             if_else(m_slope/sig_slope < 1 & m_slope/sig_slope > -1,
+                                     "Zero", "Positive")))
 
 # construct models of trait predictions
 # make the different data sets
@@ -148,7 +156,7 @@ CNcat <- model.matrix(~factor(CNdat$slope_cat, levels=c("Zero","Negative",  "Pos
 leafCN <- log(CNdat$m_CN_spp); hist(leafCN)
 N_CN <- as.numeric(length(leafCN))
 
-# assemble the data for trait model
+# assemble the dat for trait model
 jags.data <- list("slacat", "sla", "N_sla", "hcat", "height",
                   "N_h", "seedcat","seed", "N_seed", "ldmccat", 
                   "ldmc", "N_ldmc", "thickcat", "thick", "N_thick", "Ncat",
@@ -160,7 +168,7 @@ jags.params <- c("asla", "aH", "aseed",  "aLDMC", "aT", "aN", "aC", "aCN",
                  "sig_H", "sig_seed", "sig_ldmc", 
                  "sig_T", "sig_N",  "sig_C", "sig_CN")
 
-# Step 2 - trait model
+# Step 2 - Trait model 
 traitmod <- function(){
   for(i in 1:N_sla){
     sla[i] ~ dnorm(mu[i], prec_sla)
@@ -228,12 +236,11 @@ traitmod <- function(){
 }
 
 # run the trait model
-traitcovmat <- jags.parallel(data=jags.data,inits=NULL, parameters.to.save=jags.params,
+traitextmat <- jags.parallel(data=jags.data,inits=NULL, parameters.to.save=jags.params,
                              n.iter=50000 ,model.file=traitmod, n.thin=5, n.chains=3)
 
-# trait model results
-traitcovmat
-
+# triat model results
+traitextmat
 
 ####################################################################################
 ## AP differences
@@ -246,13 +253,12 @@ spp <- factor(dat$species)
 ap <- dat$ap_meandiff
 
 #dependent variable
-cov <- dat$dif2
-N <- as.numeric(length(cov))
+ext <- dat$extinct
+N <- as.numeric(length(ext))
 
-# set up data and parms for the model 
-jags.data <- list("site", "block","spp", "ap", "cov", "N")
-jags.param <- c("a", "b", "rss","rss.new", "prec1","prec2", "prec3", "asig1",
-                "asig2", "asig3")
+# set up the data and params
+jags.data <- list("site", "block","spp", "ap", "ext", "N")
+jags.param <- c("a", "b",  "prec1","prec2", "asig1","asig2")
 
 # step 1 - CDS model
 apdifmod <- function(){ 
@@ -261,49 +267,40 @@ apdifmod <- function(){
   for (j in 1:60){blokkere[j]~dnorm(0, prec2)}
   #likelihood
   for (i in 1:N){
-    cov[i]~dnorm(mu[i], prec3)
-    mu[i] <- a[spp[i]]+ b[spp[i]]*ap[i] + nettstedet[site[i]]+ 
+    ext[i]~dbern(mu[i])
+    logit(mu[i]) <- a[spp[i]]+ b[spp[i]]*ap[i] + nettstedet[site[i]]+ 
       blokkere[block[i]]
-    
-    res[i] <- pow(cov[i]-mu[i], 2)
-    cov.new[i] ~ dnorm(mu[i], prec3)
-    res.new[i] <- pow(cov.new[i]-mu[i],2)
   }
   # priors
   for(j in 1:75){a[j]~dnorm(0, 1E-6)}
   for(j in 1:75){b[j]~dnorm(0, 1E-6)}
   prec1~dgamma(0.001,0.001)
   prec2~dgamma(0.001,0.001)
-  prec3~dgamma(0.001,0.001)
   asig1 <- 1/sqrt(prec1)
   asig2 <- 1/sqrt(prec2)
-  asig3 <- 1/sqrt(prec3)
-  # derived params
-  rss <- sum(res[])
-  rss.new <- sum(res.new[])
 }
 
-#run the model 
+# run the model
 apdif <- jags.parallel(data=jags.data,inits=NULL, parameters.to.save=jags.param,
-                       n.iter=50000 ,model.file=apdifmod, n.thin=5, n.chains=3)
+                       n.iter=500000 ,model.file=apdifmod, n.thin=5, n.chains=3)
 
-# the results
+# see results
 apdif 
 
 # pull posteriors in list 
 apdif.paramlist <- apdif$BUGSoutput$sims.list
 
-# save poseteriors
+# save posteriors
 apint <- data.frame(apdif.paramlist$a)
 names(apint) <- c(levels(spp))
 apint <- data.frame(apply(apint, 2, sort))
-write.csv(apint, "SppCovIntAP_post.csv")
+write.csv(apint, "SppExtIntAP_post.csv")
 apint <- apint %>% gather(key="spp", value="int")
 
 apslop <- as.data.frame(apdif.paramlist$b)
 names(apslop) <- c(levels(spp))
 apslop <- data.frame(apply(apslop, 2, sort))
-write.csv(apslop,"SppCovSlopeAP_post.csv" )
+write.csv(apslop,"SppExtSlopeAP_post.csv" )
 apslop <- apslop %>% gather(key="spp", value="slope")
 
 apint$slope <- apslop$slope
@@ -325,18 +322,25 @@ spprangemat <- dat %>% group_by(species) %>%
             meanap = mean(ap_meandiff))%>%
   rename(spp=species)
 
-apdifparm <- full_join(apdifparm, spprangemat, by="spp", copy=TRUE)
+# combine the sets
+apdifparm <- full_join(apdifparm, select(spprangemat, meanap, spp),by="spp", copy=TRUE)
 
 # add in the trait data
 traitformod <-  dat %>% select(species, m_height_spp:seed_mass) %>% unique()
 apdifparm <- left_join(apdifparm, traitformod, by=c("spp"="species"))
 
-# classify by CDS
-apdifparm <- apdifparm %>% mutate(slope_cat = if_else(m_slope/sig_slope <  -1, "Negative", 
-                           if_else(m_slope/sig_slope < 1 & m_slope/sig_slope > -1,
-                                                              "Zero", "Positive")))
+# remove species that didn't converge
+apdifparm <- apdifparm %>% 
+  filter(!spp %in% c("Car.lep","Car.pan", "Gal.ver","Luz.pil", "Mel.pra", "Noc.cae"))
 
-#Set up the data sets 
+# Classify CDSs
+apdifparm <- apdifparm %>% 
+  mutate(slope_cat = if_else(m_slope/sig_slope <  -1, "Negative",
+                             if_else(m_slope/sig_slope < 1 & m_slope/sig_slope > -1,
+                                     "Zero", "Positive")))
+
+# Construct models for trait predictions
+# make the different datasets 
 sladat <- filter(apdifparm, !is.na(m_sla_spp))
 slacat <- model.matrix(~factor(sladat$slope_cat, levels=c("Zero","Negative",  "Positive")))
 sla <- log(sladat$m_sla_spp);hist(sla)
@@ -377,7 +381,6 @@ CNcat <- model.matrix(~factor(CNdat$slope_cat, levels=c("Zero","Negative",  "Pos
 leafCN <- log(CNdat$m_CN_spp); hist(leafCN)
 N_CN <- as.numeric(length(leafCN))
 
-# set up the data for trait AP CDS analysis
 jags.data <- list("slacat", "sla", "N_sla", "hcat", "height",
                   "N_h", "seedcat","seed", "N_seed", "ldmccat", 
                   "ldmc", "N_ldmc", "thickcat", "thick", "N_thick", "Ncat",
@@ -389,7 +392,7 @@ jags.params <- c("asla", "aH", "aseed",  "aLDMC", "aT", "aN", "aC", "aCN",
                  "sig_H", "sig_seed", "sig_ldmc", 
                  "sig_T", "sig_N",  "sig_C", "sig_CN")
 
-# the model
+# step 2 - trait model
 traitmod <- function(){
   for(i in 1:N_sla){
     sla[i] ~ dnorm(mu[i], prec_sla)
@@ -456,9 +459,10 @@ traitmod <- function(){
   for(i in 1:3){aCN[i]~dnorm(0, 1E-6)}
 }
 
-# run the model 
-traitcovap <- jags.parallel(data=jags.data,inits=NULL, parameters.to.save=jags.params,
+# run the model
+traitextap <- jags.parallel(data=jags.data,inits=NULL, parameters.to.save=jags.params,
                             n.iter=50000 ,model.file=traitmod, n.thin=5, n.chains=3)
 
-# ap trait results
-traitcovap
+# see results
+traitextap
+
